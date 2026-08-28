@@ -1,0 +1,33 @@
+name: Assemble technical report PDF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.upload/ready'
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble PDF
+        shell: bash
+        run: |
+          cat .upload/screen.b64.part* > /tmp/report.b64
+          base64 -d /tmp/report.b64 > /tmp/report.pdf.xz
+          xz -d -c /tmp/report.pdf.xz > Predictive_Maintenance_ATLAS_TileCal_Report.pdf
+          pdfinfo Predictive_Maintenance_ATLAS_TileCal_Report.pdf | grep -q 'Pages:.*10'
+          rm -rf .upload
+          rm -f .github/workflows/assemble-report.yml
+      - name: Commit PDF
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add technical report PDF'
+          git push
