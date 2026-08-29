@@ -21,7 +21,7 @@ jobs:
           base64 -d /tmp/report.xz.b64 > /tmp/report.pdf.xz
           xz -d -c /tmp/report.pdf.xz > Predictive_Maintenance_ATLAS_TileCal_Report.pdf
           test -s Predictive_Maintenance_ATLAS_TileCal_Report.pdf
-          echo 'c571ab58279773f1b0ce805d410e2c2d49aef393d20fc23992da50b8d742ef68  Predictive_Maintenance_ATLAS_TileCal_Report.pdf' | sha256sum -c -
+          echo '83d7066f4a6a9c2ec7e5eb8bd3c017652f75423d22e2c9db8e75f33e21b1f8ec  Predictive_Maintenance_ATLAS_TileCal_Report.pdf' | sha256sum -c -
           rm -rf .upload
           rm -f .github/workflows/assemble-report.yml
       - name: Commit final report
