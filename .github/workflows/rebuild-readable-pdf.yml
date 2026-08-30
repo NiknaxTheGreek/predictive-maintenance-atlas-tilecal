@@ -19,33 +19,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Assemble and validate high-resolution report
+      - name: Recover and validate high-resolution report
         shell: bash
         run: |
           set -euo pipefail
-          test -d .upload-readable
-          test -f .upload-readable/part00
-          test -f .upload-readable/part08
 
-          cat .upload-readable/part0[0-8] > /tmp/tilecal-report.b64
-          base64 --decode /tmp/tilecal-report.b64 > /tmp/tilecal-report.pdf.xz
+          # Recover the intact staged high-resolution payload from the earlier transfer branch.
+          git checkout origin/pdf-transfer-final-5 -- .upload
+          test -f .upload/finalx.b64.part00
+          test -f .upload/finalx.b64.part04
+
+          cat .upload/finalx.b64.part* > /tmp/tilecal-report.xz.b64
+          base64 --decode /tmp/tilecal-report.xz.b64 > /tmp/tilecal-report.pdf.xz
           xz --test /tmp/tilecal-report.pdf.xz
           xz --decompress --stdout /tmp/tilecal-report.pdf.xz > /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
 
           head -c 5 /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf | grep -q '%PDF-'
+          echo 'c571ab58279773f1b0ce805d410e2c2d49aef393d20fc23992da50b8d742ef68  /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf' | sha256sum -c -
 
           old_size=$(stat -c%s Predictive_Maintenance_ATLAS_TileCal_Report.pdf)
           new_size=$(stat -c%s /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf)
           echo "Current PDF: ${old_size} bytes"
           echo "Readable PDF: ${new_size} bytes"
-          test "$new_size" -gt "$old_size"
 
           if command -v pdfinfo >/dev/null 2>&1; then
             pdfinfo /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
           fi
 
           mv /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf Predictive_Maintenance_ATLAS_TileCal_Report.pdf
-          rm -rf .upload-readable
+          rm -rf .upload .upload-readable
           rm -f .github/workflows/rebuild-readable-pdf.yml
 
       - name: Commit readable PDF replacement
