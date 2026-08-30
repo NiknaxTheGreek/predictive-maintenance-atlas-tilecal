@@ -1,0 +1,119 @@
+name: Normalize TileCal PDF for GitHub preview
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/normalize-pdf-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  normalize-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PDF tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y poppler-utils
+          python -m pip install --quiet pymupdf pillow
+
+      - name: Convert figures to browser-safe DeviceRGB JPEGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import io
+          import pymupdf
+          from PIL import Image
+
+          src = 'Predictive_Maintenance_ATLAS_TileCal_Report.pdf'
+          out = '/tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf'
+          doc = pymupdf.open(src)
+          target_pages = [1, 2, 3, 5, 6, 7]
+
+          for pidx in target_pages:
+              page = doc[pidx]
+              images = page.get_images(full=True)
+              if len(images) != 1:
+                  raise RuntimeError(f'Expected one figure image on page {pidx + 1}, found {len(images)}')
+              xref = images[0][0]
+              raw = doc.extract_image(xref)['image']
+              im = Image.open(io.BytesIO(raw)).convert('RGB')
+
+              # Keep publication quality while reducing the decoding load of GitHub's inline viewer.
+              max_width = 2600
+              if im.width > max_width:
+                  new_h = round(im.height * max_width / im.width)
+                  im = im.resize((max_width, new_h), Image.Resampling.LANCZOS)
+
+              buf = io.BytesIO()
+              im.save(buf, 'JPEG', quality=96, subsampling=0, optimize=True, progressive=False)
+              page.replace_image(xref, stream=buf.getvalue())
+              # Force the simplest widely-supported PDF colour space; no ICC profile or alpha mask.
+              doc.xref_set_key(xref, 'ColorSpace', '/DeviceRGB')
+
+          doc.save(out, garbage=4, deflate=True, clean=True)
+          print('Wrote', out)
+          PY
+
+      - name: Validate browser-compatible image encoding and render
+        shell: bash
+        run: |
+          set -euo pipefail
+          PDF=/tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
+          test -s "$PDF"
+          test "$(pdfinfo "$PDF" | awk '/^Pages:/ {print $2}')" = "10"
+          pdftotext "$PDF" /tmp/final.txt
+          grep -q 'Predictive Maintenance' /tmp/final.txt
+
+          pdfimages -list "$PDF" | tee /tmp/images.txt
+          test "$(awk '$3=="image" {n++} END {print n+0}' /tmp/images.txt)" = "6"
+          test "$(awk '$3=="smask" {n++} END {print n+0}' /tmp/images.txt)" = "0"
+          test "$(awk '$3=="image" && ($6!="rgb" || $9!="jpeg") {n++} END {print n+0}' /tmp/images.txt)" = "0"
+
+          python - <<'PY'
+          import pymupdf
+          pdf='/tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf'
+          doc=pymupdf.open(pdf)
+          dpis=[]
+          for pno,page in enumerate(doc,1):
+              for info in page.get_images(full=True):
+                  xref=info[0]
+                  pix=pymupdf.Pixmap(doc,xref)
+                  for rect in page.get_image_rects(xref):
+                      dpi=min(pix.width/(rect.width/72), pix.height/(rect.height/72))
+                      dpis.append(dpi)
+                      print(f'page={pno:02d} {pix.width}x{pix.height} effective_dpi={dpi:.1f}')
+          if len(dpis) != 6 or min(dpis) < 400:
+              raise SystemExit(f'FAIL: image count={len(dpis)}, min DPI={min(dpis) if dpis else 0:.1f}')
+          print(f'PASS: six browser-safe images; minimum effective DPI={min(dpis):.1f}')
+          PY
+
+          mkdir -p /tmp/rendered
+          pdftoppm -png -r 200 "$PDF" /tmp/rendered/page >/dev/null 2>&1
+          test "$(find /tmp/rendered -name 'page-*.png' | wc -l)" = "10"
+
+      - name: Upload QA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilecal-github-preview-qa
+          path: |
+            /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
+            /tmp/rendered/page-*.png
+
+      - name: Publish preview-compatible PDF to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf Predictive_Maintenance_ATLAS_TileCal_Report.pdf
+          rm -f .github/workflows/normalize-pdf-preview.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Make TileCal PDF figures render in GitHub preview'
+          git push origin main
