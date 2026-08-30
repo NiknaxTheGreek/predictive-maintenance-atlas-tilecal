@@ -1,4 +1,4 @@
-name: Diagnose TileCal PDF figures
+name: Build high-resolution TileCal PDF preview
 
 on:
   push:
@@ -11,52 +11,221 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  build-preview:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PDF inspection tools
+      - name: Install PDF tooling
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y poppler-utils
-          python -m pip install --quiet pymupdf pillow
+          python -m pip install --quiet pymupdf pillow matplotlib numpy
 
-      - name: Inspect embedded figures
+      - name: Rebuild six figures at publication resolution
         shell: bash
         run: |
           set -euo pipefail
-          PDF=Predictive_Maintenance_ATLAS_TileCal_Report.pdf
-          echo '=== PDF INFO ==='
-          pdfinfo "$PDF" | sed -n '1,20p'
-          echo '=== EMBEDDED RASTER IMAGES ==='
-          pdfimages -list "$PDF"
-          echo '=== IMAGE PLACEMENTS / EFFECTIVE DPI ==='
-          python - <<'PY'
-          import fitz
-          from collections import defaultdict
-          doc=fitz.open('Predictive_Maintenance_ATLAS_TileCal_Report.pdf')
-          for pno,page in enumerate(doc,1):
-              seen=set()
-              for info in page.get_images(full=True):
-                  xref=info[0]
-                  if xref in seen: continue
-                  seen.add(xref)
-                  pix=fitz.Pixmap(doc,xref)
-                  for rect in page.get_image_rects(xref):
-                      dx = pix.width / (rect.width/72) if rect.width else 0
-                      dy = pix.height / (rect.height/72) if rect.height else 0
-                      print(f'page={pno:02d} xref={xref:04d} pixels={pix.width}x{pix.height} rect={rect.width:.1f}x{rect.height:.1f}pt effective_dpi={dx:.1f}x{dy:.1f}')
+          cat > /tmp/rebuild_figures.py <<'PY'
+          import io, math
+          import numpy as np
+          import pymupdf
+          from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw, ImageFont
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.pyplot as plt
+          from matplotlib.patches import Rectangle, Circle, FancyBboxPatch, FancyArrowPatch
+
+          SRC='Predictive_Maintenance_ATLAS_TileCal_Report.pdf'
+          OUT='Predictive_Maintenance_ATLAS_TileCal_Report_HIRES_PREVIEW.pdf'
+          doc=pymupdf.open(SRC)
+
+          # The compact report has exactly one raster figure on pages 2,3,4,6,7,8.
+          page_indices=[1,2,3,5,6,7]
+          xrefs=[]
+          originals=[]
+          for pidx in page_indices:
+              page=doc[pidx]
+              imgs=page.get_images(full=True)
+              if len(imgs) != 1:
+                  raise RuntimeError(f'Expected one raster figure on page {pidx+1}, found {len(imgs)}')
+              xref=imgs[0][0]
+              xrefs.append(xref)
+              raw=doc.extract_image(xref)['image']
+              originals.append(Image.open(io.BytesIO(raw)).convert('RGB'))
+
+          def fig_bytes(fig, dpi=360):
+              b=io.BytesIO()
+              fig.savefig(b, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0.03, facecolor='white')
+              plt.close(fig)
+              return b.getvalue()
+
+          def add_box(ax, xy, wh, text, fs=12, lw=1.2):
+              x,y=xy; w,h=wh
+              box=FancyBboxPatch((x,y),w,h,boxstyle='round,pad=0.015,rounding_size=0.02',
+                                 linewidth=lw,edgecolor='0.25',facecolor='0.97')
+              ax.add_patch(box)
+              ax.text(x+w/2,y+h/2,text,ha='center',va='center',fontsize=fs,wrap=True)
+              return (x,y,w,h)
+
+          def arrow(ax, p1, p2, lw=1.2):
+              ax.add_patch(FancyArrowPatch(p1,p2,arrowstyle='-|>',mutation_scale=12,
+                                           linewidth=lw,color='0.2'))
+
+          # FIGURE 1 — clean schematic replacing the 72-DPI four-panel collage.
+          fig,axs=plt.subplots(2,2,figsize=(12,8),constrained_layout=True)
+          ax=axs[0,0]; ax.set_aspect('equal'); ax.axis('off'); ax.set_title('(a) ATLAS detector context',fontsize=14,pad=8)
+          for r,label in [(1.0,'Muon system'),(.78,'Calorimeters'),(.55,'TileCal region'),(.34,'Inner detector')]:
+              c=Circle((0,0),r,fill=False,linewidth=2 if label=='TileCal region' else 1.2)
+              ax.add_patch(c); ax.text(0,r-0.08,label,ha='center',va='top',fontsize=11)
+          ax.add_patch(Rectangle((-1.15,-.08),2.3,.16,facecolor='0.85',edgecolor='0.4'))
+          ax.text(0,-1.13,'proton–proton collision point and cylindrical detector layers',ha='center',fontsize=10)
+          ax.set_xlim(-1.25,1.25); ax.set_ylim(-1.25,1.25)
+
+          ax=axs[0,1]; ax.axis('off'); ax.set_title('(b) TileCal read-out partitions',fontsize=14,pad=8)
+          labels=['EBA','LBA','LBC','EBC']
+          xs=[.05,.27,.51,.75]; ws=[.19,.22,.22,.19]
+          for x,w,lbl in zip(xs,ws,labels):
+              ax.add_patch(FancyBboxPatch((x,.38),w,.28,boxstyle='round,pad=0.01',facecolor='0.95',edgecolor='0.25',linewidth=1.6))
+              ax.text(x+w/2,.53,lbl,ha='center',va='center',fontsize=16,fontweight='bold')
+              ax.text(x+w/2,.42,'64 modules',ha='center',va='center',fontsize=10)
+          arrow(ax,(.02,.52),(.96,.52),lw=1.0)
+          ax.text(.5,.25,'Extended barrel   ←   Long barrel   →   Extended barrel',ha='center',fontsize=11)
+          ax.set_xlim(0,1); ax.set_ylim(0,1)
+
+          ax=axs[1,0]; ax.axis('off'); ax.set_title('(c) Representative TileCal module electronics',fontsize=14,pad=8)
+          boxes=[(.03,.40,.18,.25,'Scintillator\n+ PMTs'),(.28,.40,.18,.25,'Front-end\nelectronics'),(.53,.40,.18,.25,'Drawer /\nread-out'),(.78,.40,.18,.25,'LVPS / HVPS\n+ sensors')]
+          for x,y,w,h,t in boxes: add_box(ax,(x,y),(w,h),t,fs=11)
+          for a,b in [((.21,.525),(.28,.525)),((.46,.525),(.53,.525)),((.71,.525),(.78,.525))]: arrow(ax,a,b)
+          add_box(ax,(.39,.08),(.22,.17),'TileCal DCS\nmonitoring',fs=12)
+          arrow(ax,(.87,.40),(.61,.23)); arrow(ax,(.50,.40),(.50,.25))
+          ax.text(.5,.82,'Module-level hardware state and alarm information',ha='center',fontsize=11)
+          ax.set_xlim(0,1); ax.set_ylim(0,1)
+
+          ax=axs[1,1]; ax.axis('off'); ax.set_title('(d) ATLAS-wide DCS and TileCal DCS',fontsize=14,pad=8)
+          add_box(ax,(.34,.72),(.32,.16),'ATLAS Detector\nControl System',fs=12)
+          add_box(ax,(.34,.45),(.32,.16),'TileCal DCS',fs=13)
+          add_box(ax,(.04,.10),(.25,.19),'Global / partition\nmonitoring',fs=10)
+          add_box(ax,(.37,.10),(.25,.19),'Module hardware\nLVPS · HVPS · cooling',fs=10)
+          add_box(ax,(.70,.10),(.25,.19),'Alarm archive\nError-level records',fs=10)
+          arrow(ax,(.50,.72),(.50,.61)); arrow(ax,(.50,.45),(.17,.29)); arrow(ax,(.50,.45),(.50,.29)); arrow(ax,(.50,.45),(.82,.29))
+          ax.set_xlim(0,1); ax.set_ylim(0,1)
+          fig1=fig_bytes(fig,360)
+
+          # FIGURE 2 — LSTM information flow, redrawn from the report's gate equations.
+          fig,ax=plt.subplots(figsize=(12,4.2)); ax.axis('off'); ax.set_xlim(0,12); ax.set_ylim(-1.7,3.2)
+          ax.plot([.5,11.5],[2.25,2.25],linewidth=2,color='0.2')
+          ax.text(.25,2.25,r'$c_{t-1}$',ha='right',va='center',fontsize=18); ax.text(11.65,2.25,r'$c_t$',va='center',fontsize=18)
+          gate_x=[2.6,4.7,6.4,8.4]; gate_lab=[r'$\sigma$',r'$\sigma$',r'$\tanh$',r'$\sigma$']; gate_names=['forget gate $f_t$','input gate $i_t$','candidate $\\tilde{c}_t$','output gate $o_t$']
+          for x,g,n in zip(gate_x,gate_lab,gate_names):
+              ax.add_patch(Circle((x,0),.36,facecolor='0.94',edgecolor='0.25',linewidth=1.5)); ax.text(x,0,g,ha='center',va='center',fontsize=16); ax.text(x,-.78,n,ha='center',fontsize=12)
+          for x,y,s in [(2.6,2.25,'×'),(5.55,1.25,'×'),(6.8,2.25,'+'),(9.9,.95,'×')]:
+              ax.add_patch(Circle((x,y),.31,facecolor='white',edgecolor='0.25',linewidth=1.4)); ax.text(x,y,s,ha='center',va='center',fontsize=15)
+          arrow(ax,(2.6,.36),(2.6,1.94)); arrow(ax,(4.7,.36),(5.30,1.12)); arrow(ax,(6.4,.36),(5.80,1.12)); arrow(ax,(5.86,1.38),(6.50,2.12)); arrow(ax,(2.91,2.25),(6.48,2.25)); arrow(ax,(7.11,2.25),(11.45,2.25))
+          arrow(ax,(6.8,1.94),(9.72,1.15)); ax.text(8.35,1.47,r'$\tanh$',fontsize=13)
+          arrow(ax,(8.4,.36),(9.75,.78)); arrow(ax,(10.20,.95),(11.45,.95)); ax.text(11.65,.95,r'$h_t$',va='center',fontsize=18)
+          ax.plot([.5,9.3],[-.05,-.05],linewidth=1.5,color='0.25'); ax.text(.25,-.05,r'$x_t,\ h_{t-1}$',ha='right',va='center',fontsize=16)
+          for x in gate_x: arrow(ax,(x,-.05),(x,-.34 if False else -.01))
+          ax.text(6,2.95,'Gated information flow through an LSTM cell',ha='center',fontsize=15,fontweight='bold')
+          fig2=fig_bytes(fig,380)
+
+          # FIGURE 3 — end-to-end pipeline with two clear modelling branches.
+          fig,ax=plt.subplots(figsize=(13,8)); ax.axis('off'); ax.set_xlim(0,1); ax.set_ylim(0,1)
+          left=[(.02,.42,.12,.16,'TileCal DCS\nalarm archive'),(.17,.42,.12,.16,'Data-taking\nperiod selection'),(.32,.42,.12,.16,'Error-level\nfiltering'),(.47,.42,.14,.16,'NLP cleaning\nand normalisation'),(.64,.42,.15,.16,'Partition · hardware\nmodule · alarm class')]
+          for x,y,w,h,t in left: add_box(ax,(x,y),(w,h),t,fs=10)
+          for i in range(len(left)-1): arrow(ax,(left[i][0]+left[i][2],.50),(left[i+1][0],.50))
+          add_box(ax,(.82,.68),(.16,.12),'Module/alarm series\ntime bins + hotspot selection',fs=9)
+          add_box(ax,(.82,.49),(.16,.12),'Scaling / smoothing\nsliding windows',fs=9)
+          add_box(ax,(.82,.30),(.16,.12),'LSTM count\nforecasting',fs=10)
+          ax.text(.90,.86,'Forecasting branch',ha='center',fontsize=13,fontweight='bold')
+          arrow(ax,(.79,.52),(.86,.68)); arrow(ax,(.90,.68),(.90,.61)); arrow(ax,(.90,.49),(.90,.42))
+          add_box(ax,(.49,.18),(.15,.12),'Partition-level counts\n15-min bins',fs=9)
+          add_box(ax,(.67,.18),(.15,.12),'Dominant alarm class\nraw / chatter-reduced',fs=9)
+          add_box(ax,(.85,.18),(.13,.12),'LSTM class\nforecast',fs=9)
+          ax.text(.73,.08,'Classification branch',ha='center',fontsize=13,fontweight='bold')
+          arrow(ax,(.71,.42),(.57,.30)); arrow(ax,(.64,.24),(.67,.24)); arrow(ax,(.82,.24),(.85,.24))
+          add_box(ax,(.05,.12),(.28,.16),'Predictive-maintenance information\nWHERE? · HOW MUCH? · WHAT TYPE?',fs=11)
+          arrow(ax,(.85,.36),(.33,.23)); arrow(ax,(.49,.24),(.33,.20))
+          fig3=fig_bytes(fig,360)
+
+          # FIGURE 4 — data-grounded spatial summary using the table values in the report.
+          alarms=['EMR','ALERT','TRIPPED','NO TOGGLE','NO CONNECTION']
+          parts=['EBA','EBC','LBA','LBC']
+          vals=np.array([[7.57,0.00,0.74,7.63],[41.01,50.47,1.33,53.69],[0.99,9.43,0.34,2.28],[28.94,26.65,0.68,7.92],[21.49,13.44,96.90,28.47]])
+          contrib=np.array([17.48,4.52,63.20,14.95])
+          target_counts=np.array([60,64,11146,180])
+          target_labels=['EBA M6\nNO TOGGLE','EBC M10\nALERT','LBA M48\nNO CONNECTION','LBC M2\nALERT']
+          modules=[6,10,48,2]
+          fig,axs=plt.subplots(2,2,figsize=(12,8),constrained_layout=True)
+          ax=axs[0,0]; im=ax.imshow(vals,aspect='auto'); ax.set_xticks(range(4),parts); ax.set_yticks(range(5),alarms); ax.set_title('(a) Alarm-category share within each partition',fontsize=12)
+          for i in range(5):
+              for j in range(4): ax.text(j,i,f'{vals[i,j]:.1f}%',ha='center',va='center',fontsize=9)
+          fig.colorbar(im,ax=ax,fraction=.045,pad=.03,label='% of partition alarms')
+          ax=axs[0,1]; ax.bar(parts,contrib); ax.set_ylabel('Contribution to TileCal alarms (%)'); ax.set_title('(b) Partition contribution',fontsize=12)
+          for i,v in enumerate(contrib): ax.text(i,v+1,f'{v:.2f}%',ha='center',fontsize=9)
+          ax=axs[1,0]; ax.bar(range(4),target_counts); ax.set_yscale('log'); ax.set_xticks(range(4),target_labels,fontsize=8); ax.set_ylabel('Alarm count (log scale)'); ax.set_title('(c) Selected high-activity forecasting targets',fontsize=12)
+          for i,v in enumerate(target_counts): ax.text(i,v*1.18,f'{v:,}',ha='center',fontsize=9)
+          ax=axs[1,1]; sizes=220+250*np.log10(target_counts); ax.scatter(parts,modules,s=sizes,alpha=.75,edgecolors='0.25'); ax.set_ylabel('Module number'); ax.set_ylim(0,64); ax.set_title('(d) Spatial location of selected targets',fontsize=12)
+          for x,m,t,c in zip(range(4),modules,target_labels,target_counts): ax.annotate(t.replace('\n',' '),(x,m),xytext=(0,12),textcoords='offset points',ha='center',fontsize=8)
+          fig4=fig_bytes(fig,360)
+
+          # FIGURE 5 — preserve the original temporal curves exactly, but remove wasted space,
+          # enlarge each panel, and apply lossless supersampling/sharpening.
+          orig=originals[4]
+          W,H=orig.size
+          crops=[(0.02,0.02,0.49,0.43),(0.51,0.02,0.99,0.43),(0.02,0.44,0.49,0.86),(0.51,0.44,0.99,0.86)]
+          titles=['(a) EBA M6 — NO TOGGLE · 15 min','(b) EBC M10 — ALERT · 25 ms','(c) LBA M48 — NO CONNECTION · 1 h','(d) LBC M2 — ALERT · 15 min']
+          canvas=Image.new('RGB',(2400,1500),'white'); draw=ImageDraw.Draw(canvas)
+          try: font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',38); small=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',30)
+          except: font=None; small=None
+          positions=[(90,100),(1260,100),(90,790),(1260,790)]
+          panel_size=(1050,520)
+          for box,title,pos in zip(crops,titles,positions):
+              x0,y0,x1,y1=[int(v*s) for v,s in zip(box,(W,H,W,H))]
+              p=orig.crop((x0,y0,x1,y1)).resize(panel_size,Image.Resampling.LANCZOS)
+              p=ImageEnhance.Contrast(p).enhance(1.10).filter(ImageFilter.UnsharpMask(radius=1.8,percent=190,threshold=2))
+              canvas.paste(p,(pos[0],pos[1]+55)); draw.text((pos[0]+panel_size[0]//2,pos[1]),title,fill='black',font=font,anchor='ma')
+              draw.text((pos[0]+panel_size[0]//2,pos[1]+panel_size[1]+70),'Time step',fill='black',font=small,anchor='ma')
+          fig5buf=io.BytesIO(); canvas.save(fig5buf,format='PNG',compress_level=3); fig5=fig5buf.getvalue()
+
+          # FIGURE 6 — keep the original confusion-matrix evidence, but make it the dominant panel;
+          # re-render the class-level metrics from the exact table values at high resolution.
+          orig=originals[5]
+          W,H=orig.size
+          # Tight crop of the source confusion-matrix panel (values preserved, no inferred replacements).
+          cm=orig.crop((int(.01*W),int(.03*H),int(.57*W),int(.73*H)))
+          cm=cm.resize((1180,930),Image.Resampling.LANCZOS)
+          cm=ImageEnhance.Contrast(cm).enhance(1.12).filter(ImageFilter.UnsharpMask(radius=1.7,percent=210,threshold=2))
+          rawP=[.58,.00,.94,.00,.09]; proP=[.64,.67,.80,1.00,.43]
+          rawR=[.13,.00,.98,.00,.80]; proR=[.45,.29,.95,.29,1.00]
+          rawF=[.22,.00,.96,.00,.15]; proF=[.53,.40,.87,.44,.60]
+          labels=['E1 ALERT','E2 EMR','E3 NO CONN.','E4 NO TOGGLE','E5 TRIPPED']
+          fig=plt.figure(figsize=(12,8),constrained_layout=True)
+          gs=fig.add_gridspec(2,2,width_ratios=[1.2,1],height_ratios=[1,1])
+          ax=fig.add_subplot(gs[:,0]); ax.imshow(cm); ax.axis('off'); ax.set_title('(a) Processed confusion matrix — source values enlarged',fontsize=12)
+          x=np.arange(5); width=.36
+          ax=fig.add_subplot(gs[0,1]); ax.bar(x-width/2,rawP,width,label='Raw'); ax.bar(x+width/2,proP,width,label='Processed'); ax.set_ylim(0,1.08); ax.set_ylabel('Precision'); ax.set_title('(b) Precision'); ax.set_xticks(x,labels,rotation=28,ha='right',fontsize=8); ax.legend(fontsize=8)
+          ax=fig.add_subplot(gs[1,1]); ax.bar(x-width/2,rawF,width,label='Raw F1'); ax.bar(x+width/2,proF,width,label='Processed F1'); ax.plot(x,rawR,marker='o',label='Raw recall'); ax.plot(x,proR,marker='o',label='Processed recall'); ax.set_ylim(0,1.08); ax.set_ylabel('Score'); ax.set_title('(c) Recall and F1'); ax.set_xticks(x,labels,rotation=28,ha='right',fontsize=8); ax.legend(fontsize=7,ncol=2)
+          fig6=fig_bytes(fig,360)
+
+          replacements=[fig1,fig2,fig3,fig4,fig5,fig6]
+          for pidx,xref,data in zip(page_indices,xrefs,replacements):
+              doc[pidx].replace_image(xref,stream=data)
+          doc.save(OUT,garbage=4,deflate=True,clean=True)
+          print('Wrote',OUT)
           PY
+          python /tmp/rebuild_figures.py
 
-      - name: Render pages for visual QA
-        run: |
-          mkdir -p rendered
-          pdftoppm -png -r 180 Predictive_Maintenance_ATLAS_TileCal_Report.pdf rendered/page >/dev/null 2>&1
+          echo '=== HIGH-RES PREVIEW IMAGE TABLE ==='
+          pdfimages -list Predictive_Maintenance_ATLAS_TileCal_Report_HIRES_PREVIEW.pdf
+          mkdir -p hires-rendered
+          pdftoppm -png -r 180 Predictive_Maintenance_ATLAS_TileCal_Report_HIRES_PREVIEW.pdf hires-rendered/page >/dev/null 2>&1
 
-      - name: Upload rendered QA pages
+      - name: Upload high-resolution preview and rendered pages
         uses: actions/upload-artifact@v4
         with:
-          name: tilecal-pdf-rendered-pages
-          path: rendered/*.png
+          name: tilecal-hires-preview
+          path: |
+            Predictive_Maintenance_ATLAS_TileCal_Report_HIRES_PREVIEW.pdf
+            hires-rendered/*.png
           compression-level: 6
