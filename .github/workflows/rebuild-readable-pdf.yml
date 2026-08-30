@@ -23,21 +23,57 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           git checkout origin/pdf-transfer-final-5 -- .upload
-          test -f .upload/finalx.b64.part00
-          test -f .upload/finalx.b64.part04
 
-          : > /tmp/tilecal-report.pdf.xz
-          for part in .upload/finalx.b64.part*; do
-            base64 --decode --ignore-garbage "$part" >> /tmp/tilecal-report.pdf.xz
-          done
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, lzma, re, sys
 
-          xz --test /tmp/tilecal-report.pdf.xz
-          xz --decompress --stdout /tmp/tilecal-report.pdf.xz > /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
+          target = 'c571ab58279773f1b0ce805d410e2c2d49aef393d20fc23992da50b8d742ef68'
+          parts = sorted(Path('.upload').glob('finalx.b64.part*'))
+          if not parts:
+              raise SystemExit('No finalx transfer parts found')
 
-          head -c 5 /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf | grep -q '%PDF-'
-          echo 'c571ab58279773f1b0ce805d410e2c2d49aef393d20fc23992da50b8d742ef68  /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf' | sha256sum -c -
+          def clean(p):
+              s = p.read_text(encoding='utf-8', errors='ignore')
+              return ''.join(re.findall(r'[A-Za-z0-9+/=]', s))
+
+          cleaned = [clean(p) for p in parts]
+          candidates = []
+
+          # Strategy 1: one base64 stream split across text files.
+          try:
+              s = ''.join(cleaned)
+              s += '=' * ((4 - len(s) % 4) % 4)
+              candidates.append(('joined-base64', base64.b64decode(s, validate=False)))
+          except Exception as e:
+              print('joined-base64 decode failed:', e)
+
+          # Strategy 2: independently base64-encoded binary chunks.
+          try:
+              out = bytearray()
+              for s in cleaned:
+                  s += '=' * ((4 - len(s) % 4) % 4)
+                  out.extend(base64.b64decode(s, validate=False))
+              candidates.append(('per-part-base64', bytes(out)))
+          except Exception as e:
+              print('per-part-base64 decode failed:', e)
+
+          for name, payload in candidates:
+              try:
+                  pdf = lzma.decompress(payload)
+              except Exception as e:
+                  print(name, 'xz/lzma decompression failed:', e)
+                  continue
+              digest = hashlib.sha256(pdf).hexdigest()
+              print(name, 'PDF bytes=', len(pdf), 'sha256=', digest)
+              if digest == target and pdf.startswith(b'%PDF-'):
+                  Path('/tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf').write_bytes(pdf)
+                  print('Recovered verified report using', name)
+                  sys.exit(0)
+
+          raise SystemExit('No recovery strategy produced the checksum-verified PDF')
+          PY
 
           old_size=$(stat -c%s Predictive_Maintenance_ATLAS_TileCal_Report.pdf)
           new_size=$(stat -c%s /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf)
