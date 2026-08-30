@@ -1,4 +1,4 @@
-name: Rebuild readable TileCal PDF
+name: Diagnose TileCal PDF figures
 
 on:
   push:
@@ -8,92 +8,55 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  rebuild:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Recover and validate high-resolution report
+      - name: Install PDF inspection tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y poppler-utils
+          python -m pip install --quiet pymupdf pillow
+
+      - name: Inspect embedded figures
         shell: bash
         run: |
           set -euo pipefail
-          git checkout origin/pdf-transfer-final-5 -- .upload
-
+          PDF=Predictive_Maintenance_ATLAS_TileCal_Report.pdf
+          echo '=== PDF INFO ==='
+          pdfinfo "$PDF" | sed -n '1,20p'
+          echo '=== EMBEDDED RASTER IMAGES ==='
+          pdfimages -list "$PDF"
+          echo '=== IMAGE PLACEMENTS / EFFECTIVE DPI ==='
           python - <<'PY'
-          from pathlib import Path
-          import base64, hashlib, lzma, re, sys
-
-          target = 'c571ab58279773f1b0ce805d410e2c2d49aef393d20fc23992da50b8d742ef68'
-          parts = sorted(Path('.upload').glob('finalx.b64.part*'))
-          if not parts:
-              raise SystemExit('No finalx transfer parts found')
-
-          def clean(p):
-              s = p.read_text(encoding='utf-8', errors='ignore')
-              return ''.join(re.findall(r'[A-Za-z0-9+/=]', s))
-
-          cleaned = [clean(p) for p in parts]
-          candidates = []
-
-          # Strategy 1: one base64 stream split across text files.
-          try:
-              s = ''.join(cleaned)
-              s += '=' * ((4 - len(s) % 4) % 4)
-              candidates.append(('joined-base64', base64.b64decode(s, validate=False)))
-          except Exception as e:
-              print('joined-base64 decode failed:', e)
-
-          # Strategy 2: independently base64-encoded binary chunks.
-          try:
-              out = bytearray()
-              for s in cleaned:
-                  s += '=' * ((4 - len(s) % 4) % 4)
-                  out.extend(base64.b64decode(s, validate=False))
-              candidates.append(('per-part-base64', bytes(out)))
-          except Exception as e:
-              print('per-part-base64 decode failed:', e)
-
-          for name, payload in candidates:
-              try:
-                  pdf = lzma.decompress(payload)
-              except Exception as e:
-                  print(name, 'xz/lzma decompression failed:', e)
-                  continue
-              digest = hashlib.sha256(pdf).hexdigest()
-              print(name, 'PDF bytes=', len(pdf), 'sha256=', digest)
-              if digest == target and pdf.startswith(b'%PDF-'):
-                  Path('/tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf').write_bytes(pdf)
-                  print('Recovered verified report using', name)
-                  sys.exit(0)
-
-          raise SystemExit('No recovery strategy produced the checksum-verified PDF')
+          import fitz
+          from collections import defaultdict
+          doc=fitz.open('Predictive_Maintenance_ATLAS_TileCal_Report.pdf')
+          for pno,page in enumerate(doc,1):
+              seen=set()
+              for info in page.get_images(full=True):
+                  xref=info[0]
+                  if xref in seen: continue
+                  seen.add(xref)
+                  pix=fitz.Pixmap(doc,xref)
+                  for rect in page.get_image_rects(xref):
+                      dx = pix.width / (rect.width/72) if rect.width else 0
+                      dy = pix.height / (rect.height/72) if rect.height else 0
+                      print(f'page={pno:02d} xref={xref:04d} pixels={pix.width}x{pix.height} rect={rect.width:.1f}x{rect.height:.1f}pt effective_dpi={dx:.1f}x{dy:.1f}')
           PY
 
-          old_size=$(stat -c%s Predictive_Maintenance_ATLAS_TileCal_Report.pdf)
-          new_size=$(stat -c%s /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf)
-          echo "Current PDF: ${old_size} bytes"
-          echo "Readable PDF: ${new_size} bytes"
-
-          if command -v pdfinfo >/dev/null 2>&1; then
-            pdfinfo /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
-          fi
-
-          mv /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf Predictive_Maintenance_ATLAS_TileCal_Report.pdf
-          rm -rf .upload .upload-readable
-          rm -f .github/workflows/rebuild-readable-pdf.yml
-
-      - name: Commit readable PDF replacement
-        shell: bash
+      - name: Render pages for visual QA
         run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'Replace TileCal report with readable high-resolution figures'
-          git push origin main
+          mkdir -p rendered
+          pdftoppm -png -r 180 Predictive_Maintenance_ATLAS_TileCal_Report.pdf rendered/page >/dev/null 2>&1
+
+      - name: Upload rendered QA pages
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilecal-pdf-rendered-pages
+          path: rendered/*.png
+          compression-level: 6
