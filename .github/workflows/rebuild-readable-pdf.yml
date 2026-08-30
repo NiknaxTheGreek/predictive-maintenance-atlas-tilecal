@@ -28,8 +28,11 @@ jobs:
           test -f .upload/finalx.b64.part00
           test -f .upload/finalx.b64.part04
 
-          cat .upload/finalx.b64.part* > /tmp/tilecal-report.xz.b64
-          base64 --decode --ignore-garbage /tmp/tilecal-report.xz.b64 > /tmp/tilecal-report.pdf.xz
+          : > /tmp/tilecal-report.pdf.xz
+          for part in .upload/finalx.b64.part*; do
+            base64 --decode --ignore-garbage "$part" >> /tmp/tilecal-report.pdf.xz
+          done
+
           xz --test /tmp/tilecal-report.pdf.xz
           xz --decompress --stdout /tmp/tilecal-report.pdf.xz > /tmp/Predictive_Maintenance_ATLAS_TileCal_Report.pdf
 
