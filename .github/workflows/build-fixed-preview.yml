@@ -1,0 +1,256 @@
+name: Build fixed TileCal PDF preview
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.layout-v2-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PDF tooling
+        run: pip install --quiet pymupdf pillow matplotlib numpy
+      - name: Rebuild compact pages and clean Figures 5-6
+        shell: bash
+        run: |
+          python - <<'PY'
+          import fitz, os, math
+          import numpy as np
+          import matplotlib.pyplot as plt
+          from PIL import Image, ImageDraw, ImageFont
+
+          SRC='Predictive_Maintenance_ATLAS_TileCal_Report.pdf'
+          OUT='Predictive_Maintenance_ATLAS_TileCal_Report_Fixed.pdf'
+          src=fitz.open(SRC)
+          if src.page_count != 9:
+              raise RuntimeError(f'Expected current 9-page report, found {src.page_count}')
+          W,H=src[0].rect.width,src[0].rect.height
+
+          def largest_image(page_no, out_path):
+              imgs=src[page_no].get_images(full=True)
+              if not imgs:
+                  raise RuntimeError(f'No images on page {page_no+1}')
+              best=None
+              for item in imgs:
+                  xref=item[0]
+                  info=src.extract_image(xref)
+                  try:
+                      im=Image.open(__import__('io').BytesIO(info['image']))
+                      area=im.width*im.height
+                  except Exception:
+                      continue
+                  if best is None or area>best[0]:
+                      best=(area,info['image'])
+              if best is None:
+                  raise RuntimeError(f'Could not decode images on page {page_no+1}')
+              with open(out_path,'wb') as f: f.write(best[1])
+              return out_path
+
+          flow=largest_image(3,'/tmp/flow.png')
+          fig5_source=largest_image(5,'/tmp/fig5_source.png')
+
+          # --- Figure 5: recompose the four real source panels with more breathing room. ---
+          im=Image.open(fig5_source).convert('RGB')
+          # Upscale first so text/lines survive the recomposition cleanly.
+          im=im.resize((im.width*2,im.height*2),Image.Resampling.LANCZOS)
+          sw,sh=im.size
+          # Exclude the crowded one-line legend; keep all plotted data/axes.
+          top_h=int(sh*0.84)
+          body=im.crop((0,0,sw,top_h))
+          bw,bh=body.size
+          # Quadrant crops with slight overlap so axis labels are not clipped.
+          crops=[
+              body.crop((0,0,int(bw*.515),int(bh*.505))),
+              body.crop((int(bw*.485),0,bw,int(bh*.505))),
+              body.crop((0,int(bh*.465),int(bw*.515),bh)),
+              body.crop((int(bw*.485),int(bh*.465),bw,bh)),
+          ]
+          titles=[
+              '(a) EBA M6 - NO TOGGLE (15 min)',
+              '(b) EBC M10 - ALERT (25 ms)',
+              '(c) LBA M48 - NO CONNECTION (1 h)',
+              '(d) LBC M2 - ALERT (15 min)',
+          ]
+          font_b='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+          font_r='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+          panel_w,panel_h=1000,590
+          gap_x,gap_y=50,65
+          legend_h=145
+          canvas=Image.new('RGB',(panel_w*2+gap_x,panel_h*2+gap_y+legend_h),'white')
+          title_font=ImageFont.truetype(font_b,28)
+          for k,(crop,title) in enumerate(zip(crops,titles)):
+              # Remove old compressed title strip, preserve axes and plotted data.
+              cw,ch=crop.size
+              strip=int(ch*.085)
+              clean=Image.new('RGB',(cw,ch),'white')
+              clean.paste(crop,(0,0))
+              ImageDraw.Draw(clean).rectangle((0,0,cw,strip),fill='white')
+              # Fit to common panel box while preserving aspect ratio.
+              maxw,maxh=panel_w,panel_h-50
+              ar=cw/ch
+              nw=maxw; nh=int(nw/ar)
+              if nh>maxh:
+                  nh=maxh; nw=int(nh*ar)
+              clean=clean.resize((nw,nh),Image.Resampling.LANCZOS)
+              col=k%2; row=k//2
+              x=col*(panel_w+gap_x)+(panel_w-nw)//2
+              y=row*(panel_h+gap_y)+44
+              canvas.paste(clean,(x,y))
+              d=ImageDraw.Draw(canvas)
+              tb=d.textbbox((0,0),title,font=title_font)
+              tx=col*(panel_w+gap_x)+(panel_w-(tb[2]-tb[0]))//2
+              ty=row*(panel_h+gap_y)+5
+              d.text((tx,ty),title,fill='black',font=title_font)
+
+          d=ImageDraw.Draw(canvas)
+          leg_font=ImageFont.truetype(font_r,22)
+          leg_y=panel_h*2+gap_y+24
+          entries=[
+              ('Task-condition mean',(20,40,180)),
+              ('Mean +/- 95% CI',(30,30,30)),
+              ('Reference mean',(220,150,25)),
+              ('Reference +/- 95% CI',(220,150,25)),
+              ('Baseline window',(95,95,95)),
+              ('Selected-bin boundary',(205,60,60)),
+          ]
+          xstarts=[45,365,690,1035,1370,1660]
+          for (lab,col),x in zip(entries,xstarts):
+              d.line((x,leg_y+12,x+54,leg_y+12),fill=col,width=5)
+              if 'boundary' in lab:
+                  # dotted indicator
+                  d.rectangle((x,leg_y+8,x+10,leg_y+16),fill='white')
+              d.text((x+66,leg_y),lab,fill='black',font=leg_font)
+          fig5='/tmp/fig5_tidy.png'
+          canvas.save(fig5,optimize=True)
+
+          # --- Figure 6: spacious two-column layout with short class ticks. ---
+          labels_short=['E1','E2','E3','E4','E5']
+          cm=np.array([[.45,0,0,0,.55],[0,.29,0,0,.71],[0,0,.95,0,.05],[0,0,0,.29,.71],[0,0,0,0,1.]])
+          raw_p=np.array([.58,0,.94,0,.09]); proc_p=np.array([.64,.67,.80,1.,.43])
+          raw_r=np.array([.13,0,.98,0,.80]); proc_r=np.array([.45,.29,.95,.29,1.])
+          raw_f=np.array([.22,0,.96,0,.15]); proc_f=np.array([.53,.40,.87,.44,.60])
+          fig=plt.figure(figsize=(13.5,7.7),dpi=240,constrained_layout=True)
+          gs=fig.add_gridspec(3,2,width_ratios=[1.05,1.15],height_ratios=[1,1,1],wspace=.18,hspace=.26)
+          ax=fig.add_subplot(gs[:,0])
+          hm=ax.imshow(cm,vmin=0,vmax=1,cmap='Greens')
+          ax.set_title('(a) Processed classifier',fontsize=14,pad=10,weight='bold')
+          ax.set_xticks(range(5),labels_short,fontsize=11)
+          ax.set_yticks(range(5),labels_short,fontsize=11)
+          ax.set_xlabel('Predicted class',fontsize=12,labelpad=7)
+          ax.set_ylabel('True class',fontsize=12,labelpad=7)
+          for i in range(5):
+              for j in range(5):
+                  v=cm[i,j]
+                  ax.text(j,i,f'{v:.2f}',ha='center',va='center',fontsize=10.5,
+                          color='white' if v>.58 else 'black')
+          cb=fig.colorbar(hm,ax=ax,fraction=.046,pad=.035)
+          cb.ax.tick_params(labelsize=9)
+          def bars(ax,a,b,title,ylabel):
+              x=np.arange(5); w=.34
+              ax.bar(x-w/2,a,w,label='Raw')
+              ax.bar(x+w/2,b,w,label='Processed')
+              ax.set_ylim(0,1.08)
+              ax.set_title(title,fontsize=12.5,pad=7,weight='bold')
+              ax.set_ylabel(ylabel,fontsize=11)
+              ax.set_xticks(x,labels_short,fontsize=10.5)
+              ax.tick_params(axis='y',labelsize=9.5)
+              ax.grid(axis='y',alpha=.18)
+              ax.legend(frameon=False,fontsize=9.5,ncol=2,loc='upper center')
+          bars(fig.add_subplot(gs[0,1]),raw_p,proc_p,'(b) Precision','Precision')
+          bars(fig.add_subplot(gs[1,1]),raw_r,proc_r,'(c) Recall','Recall')
+          bars(fig.add_subplot(gs[2,1]),raw_f,proc_f,'(d) Per-class F1','F1-score')
+          fig.text(.5,.012,'Class key: E1 ALERT | E2 EMR | E3 NO CONNECTION | E4 NO TOGGLE | E5 TRIPPED',
+                   ha='center',fontsize=10.5)
+          fig6='/tmp/fig6_tidy.png'
+          fig.savefig(fig6,bbox_inches='tight',pad_inches=.12)
+          plt.close(fig)
+
+          out=fitz.open()
+          # Pages 1-3 unchanged.
+          for i in range(3): out.insert_pdf(src,from_page=i,to_page=i)
+
+          def header_footer(page,num):
+              page.insert_text((50,16),'Predictive Maintenance of the ATLAS Tile Calorimeter',fontname='tiro',fontsize=7.2)
+              page.insert_text((516,16),'Nicholas Perikli',fontname='tiro',fontsize=7.2)
+              page.draw_line((50,20),(545,20),color=(.25,.25,.25),width=.4)
+              page.insert_text((294,825),str(num),fontname='tiro',fontsize=7.2)
+          def clip(dst,pno,c,d):
+              dst.show_pdf_page(fitz.Rect(*d),src,pno,clip=fitz.Rect(*c),keep_proportion=False)
+          def caption(page,y0,y1,text,fs=8.15):
+              page.insert_textbox(fitz.Rect(58,y0,537,y1),text,fontname='tiro',fontsize=fs,align=fitz.TEXT_ALIGN_CENTER)
+
+          # Page 4: smaller flow diagram and pull the next subsection upward to use the page.
+          p=out.new_page(width=W,height=H)
+          clip(p,3,(0,22,W,315),(0,22,W,315))
+          fim=Image.open(flow); ar=fim.width/fim.height
+          fw=330; fh=fw/ar; fx=(W-fw)/2; fy=320
+          p.insert_image(fitz.Rect(fx,fy,fx+fw,fy+fh),filename=flow,keep_proportion=True)
+          caption(p,515,548,'Figure 3: End-to-end TileCal alarm-analysis workflow, from DCS records and NLP extraction to module-level forecasting,\npartition-level classification and predictive-maintenance outputs.',8.1)
+          clip(p,3,(45,650,550,745),(45,558,550,653))
+          clip(p,4,(45,40,550,135),(45,665,550,760))
+          header_footer(p,4)
+
+          # Page 5: continue from where the moved material ended; Figure 4 remains untouched.
+          p=out.new_page(width=W,height=H)
+          clip(p,4,(45,135,550,792),(45,38,550,695))
+          header_footer(p,5)
+
+          # Page 6: recompose Figure 5 with larger panel spacing and a two-row-friendly legend.
+          p=out.new_page(width=W,height=H)
+          clip(p,5,(45,38,550,88),(45,38,550,88))
+          im5=Image.open(fig5); ar5=im5.width/im5.height
+          fw5=472; fh5=fw5/ar5; fx5=(W-fw5)/2; fy5=92
+          p.insert_image(fitz.Rect(fx5,fy5,fx5+fw5,fy5+fh5),filename=fig5,keep_proportion=True)
+          cap5=fy5+fh5+8
+          caption(p,cap5,cap5+33,'Figure 5: Temporal behaviour of the four selected module-alarm series at their final modelling resolutions: 15 min (EBA), 25 ms (EBC),\n1 h (LBA) and 15 min (LBC).',8.05)
+          after5=cap5+40
+          clip(p,5,(45,510,550,724),(45,after5,550,after5+214))
+          header_footer(p,6)
+
+          # Page 7: clean Figure 6 and use the recovered vertical space for Discussion opening.
+          p=out.new_page(width=W,height=H)
+          clip(p,6,(45,38,550,273),(45,38,550,273))
+          im6=Image.open(fig6); ar6=im6.width/im6.height
+          fw6=474; fh6=fw6/ar6; fx6=(W-fw6)/2; fy6=284
+          p.insert_image(fitz.Rect(fx6,fy6,fx6+fw6,fy6+fh6),filename=fig6,keep_proportion=True)
+          cap6=fy6+fh6+8
+          caption(p,cap6,cap6+31,'Figure 6: Effect of chattering reduction on dominant alarm-type classification: processed confusion matrix and raw-versus-processed\nclass-level precision, recall and F1.',8.05)
+          after6=cap6+38
+          clip(p,6,(45,700,550,797),(45,after6,550,after6+97))
+          header_footer(p,7)
+
+          # Pages 8-9 unchanged.
+          out.insert_pdf(src,from_page=7,to_page=8)
+
+          tmp='/tmp/'+OUT
+          out.save(tmp,garbage=4,deflate=True,clean=True)
+          out.close(); src.close()
+          chk=fitz.open(tmp)
+          if chk.page_count!=9: raise RuntimeError(f'Unexpected page count {chk.page_count}')
+          # Render the three edited pages for QA artifact.
+          for pno in [3,5,6]:
+              pix=chk[pno].get_pixmap(matrix=fitz.Matrix(2,2),alpha=False)
+              pix.save(f'/tmp/page_{pno+1}_qa.png')
+          for pno in range(chk.page_count):
+              txt=chk[pno].get_text('text').strip()
+              if not txt: raise RuntimeError(f'Page {pno+1} has no extractable text')
+          chk.close()
+          os.replace(tmp,OUT)
+          print('Built',OUT)
+          PY
+      - name: Upload fixed PDF and QA renders
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilecal-fixed-pdf
+          path: |
+            Predictive_Maintenance_ATLAS_TileCal_Report_Fixed.pdf
+            /tmp/page_4_qa.png
+            /tmp/page_6_qa.png
+            /tmp/page_7_qa.png
+          retention-days: 3
