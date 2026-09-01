@@ -6,7 +6,7 @@ The report investigates whether archived ATLAS Tile Calorimeter (TileCal) Detect
 
 ## Report
 
-**[Predictive_Maintenance_ATLAS_TileCal_Report.pdf](./Predictive_Maintenance_ATLAS_TileCal_Report.pdf)**
+**[Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf](./Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf)**
 
 The current report is a concise 10-page technical version of the MSc work, with the methodology, hyperparameter optimisation, principal figures and quantitative results retained.
 
