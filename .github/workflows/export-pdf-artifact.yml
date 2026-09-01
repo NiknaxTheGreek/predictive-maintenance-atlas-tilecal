@@ -1,0 +1,32 @@
+name: Export TileCal PDF artifact
+
+on:
+  push:
+    branches: [pdf-transfer-final-5]
+    paths:
+      - '.github/workflows/export-pdf-artifact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct PDF
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .upload/finalx.b64.part* | tr -cd 'A-Za-z0-9+/=' | base64 --decode > /tmp/report.pdf.xz
+          xz -t /tmp/report.pdf.xz
+          xz -d -c /tmp/report.pdf.xz > Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
+          file Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf | grep -q 'PDF document'
+          sha256sum Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
+          stat -c '%s bytes' Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tilecal-final-pdf
+          path: Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
+          if-no-files-found: error
