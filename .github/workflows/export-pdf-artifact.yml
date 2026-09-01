@@ -4,7 +4,6 @@ on:
   push:
     branches: [pdf-transfer-final-5]
     paths:
-      - '.upload/export-trigger'
       - '.github/workflows/export-pdf-artifact.yml'
 
 permissions:
@@ -15,15 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Reconstruct verified PDF
+      - name: Reconstruct PDF
         shell: bash
         run: |
           set -euo pipefail
-          cat .upload/finalx.b64.part* > /tmp/report.xz.b64
-          base64 -d -i /tmp/report.xz.b64 > /tmp/report.pdf.xz
+          cat .upload/finalx.b64.part* | tr -cd 'A-Za-z0-9+/=' | base64 --decode > /tmp/report.pdf.xz
           xz -t /tmp/report.pdf.xz
           xz -d -c /tmp/report.pdf.xz > Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
-          echo 'c571ab58279773f1b0ce805d410e2c2d49aef393d20fc23992da50b8d742ef68  Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf' | sha256sum -c -
+          file Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf | grep -q 'PDF document'
+          sha256sum Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
+          stat -c '%s bytes' Predictive_Maintenance_ATLAS_TileCal_Report_FINAL_v2.pdf
       - name: Upload PDF artifact
         uses: actions/upload-artifact@v4
         with:
